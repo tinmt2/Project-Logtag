@@ -3,13 +3,26 @@
 
   /** ===================== CONFIG ===================== **/
   const RELOAD_AFTER_MS = 5 * 60 * 1000;
-  const RESCAN_INTERVAL_MS = 4 * 60 * 1000;
+  const RESCAN_INTERVAL_MS = 1 * 60 * 1000;
   const ALERT_COOLDOWN_MS = 5 * 60 * 1000;
-  const STALE_MINUTES = 5;
-  const TEMP_LOW_LT = 2.8;
-  const TEMP_HIGH_GT = 5;
-  const OVERWRITE_LOGS_EACH_TIME = true;
+  const STALE_MINUTES = 30;
+  const TEMP_LOW_LT = 3.0;
+  const TEMP_HIGH_GT = 6.0;
+  // const OVERWRITE_LOGS_EACH_TIME = true;
   const SOUND_ENABLED_DEFAULT = true;
+
+  // ===== Camera Config =====
+  const CAMERA_URL = "https://camera-giamsat-mon.fptshop.com.vn/camera-dis";
+  const CAMERA_COL = {
+    CODE_NAME: 3,
+    CH: 5,
+    STATUS: 6,
+    TRUE_1: 7,
+    TRUE_2: 8,
+    MINUTES: 11
+  };
+  const CAMERA_MINUTES_THRESHOLD = 20;
+  const CAMERA_RESCAN_MS = 15000;
 
   const SOUND_CONFIG = {
     frequency: 800,
@@ -27,6 +40,7 @@
   const LS_MINIMIZED = "tm_panel_minimized_v1";
   const LS_SOUND_ENABLED = "tm_sound_enabled_v1";
   const LS_LOGIN_CREDENTIALS = "tm_login_credentials_v1";
+  const LS_CAMERA_ALERTS = "tm_camera_alerts_v1";
 
   /** ====================== Utils ====================== **/
   const MONTH = {
@@ -67,6 +81,189 @@
     const mon = MONTH[monStr.slice(0, 3).replace(/^./, (c) => c.toUpperCase())];
     if (mon == null) return null;
     return new Date(+yyyy, mon, +dd, +hh, +mm, 0, 0);
+  }
+
+  /** ================ Camera Functions ================ **/
+  const CAMERA_MINUTES_RE = /(\d+(?:\.\d+)?)\s*m\b/i;
+
+  function camera_qsa(sel, root = document) {
+    return Array.from(root.querySelectorAll(sel));
+  }
+
+  function camera_rows() {
+    return camera_qsa('table tr').filter(tr => norm(tr.textContent).length > 10);
+  }
+
+  function camera_cell(tr, idx1) {
+    return tr.querySelector(`:scope > td:nth-child(${idx1}), :scope > th:nth-child(${idx1})`);
+  }
+
+  function camera_cellText(tr, idx1) {
+    return norm((camera_cell(tr, idx1)?.textContent) || '');
+  }
+
+  function camera_isDisconnected(tr) {
+    return /^disconnected$/i.test(camera_cellText(tr, CAMERA_COL.STATUS));
+  }
+
+  function camera_minutesValue(tr) {
+    const txt = camera_cellText(tr, CAMERA_COL.MINUTES);
+    const m = txt.match(CAMERA_MINUTES_RE);
+    return m ? parseFloat(m[1]) : null;
+  }
+
+  function camera_isCamGS(tr) {
+    const t1 = camera_cellText(tr, CAMERA_COL.TRUE_1);
+    const t2 = camera_cellText(tr, CAMERA_COL.TRUE_2);
+    return /\btrue\b/i.test(t1) || /\btrue\b/i.test(t2);
+  }
+
+  function camera_label(tr) {
+    const codeName = camera_cellText(tr, CAMERA_COL.CODE_NAME);
+    const ch = camera_cellText(tr, CAMERA_COL.CH).toUpperCase();
+    return ch ? `${codeName} — ${ch}` : codeName;
+  }
+
+  function camera_scan() {
+    const items = [];
+    try {
+      for (const tr of camera_rows()) {
+        if (!camera_isDisconnected(tr)) continue;
+
+        const mins = camera_minutesValue(tr);
+        if (mins == null || !(mins < CAMERA_MINUTES_THRESHOLD)) continue;
+
+        items.push({ 
+          label: camera_label(tr), 
+          mins, 
+          isGS: camera_isCamGS(tr),
+          type: 'camera'
+        });
+      }
+    } catch (e) {
+      console.error('Camera scan error:', e);
+    }
+    return items;
+  }
+
+  function getCameraAlerts() {
+    return JSON.parse(localStorage.getItem(LS_CAMERA_ALERTS) || '[]');
+  }
+
+  function setCameraAlerts(alerts) {
+    localStorage.setItem(LS_CAMERA_ALERTS, JSON.stringify(alerts));
+  }
+
+  function checkCameraAlerts() {
+    // Chỉ scan camera nếu đang ở trang camera
+    if (!window.location.href.includes('camera-giamsat-mon')) {
+      return [];
+    }
+    
+    const cameraItems = camera_scan();
+    const previousAlerts = getCameraAlerts();
+    
+    if (cameraItems.length > 0) {
+      setCameraAlerts(cameraItems);
+      
+      // Chỉ thông báo nếu có thay đổi
+      const previousLabels = previousAlerts.map(a => a.label);
+      const currentLabels = cameraItems.map(a => a.label);
+      
+      const newAlerts = cameraItems.filter(item => !previousLabels.includes(item.label));
+      const resolvedAlerts = previousAlerts.filter(item => !currentLabels.includes(item.label));
+      
+      if (newAlerts.length > 0 || resolvedAlerts.length > 0) {
+        return cameraItems;
+      }
+    } else {
+      setCameraAlerts([]);
+    }
+    
+    return [];
+  }
+
+  // Biến toàn cục cho camera modal
+  let cameraModal = null;
+  let cameraTab = null;
+
+  /** ================ Camera Modal Management ================ **/
+  function openCameraModal() {
+    // Nếu modal đã tồn tại, focus vào nó
+    if (cameraModal) {
+      cameraModal.style.display = 'flex';
+      return;
+    }
+
+    // Nếu tab camera đã mở, focus vào tab đó
+    if (cameraTab && !cameraTab.closed) {
+      try {
+        cameraTab.focus();
+        return;
+      } catch (e) {
+        // Tab đã bị đóng
+        cameraTab = null;
+      }
+    }
+
+    // Tạo modal mới
+    cameraModal = document.createElement('div');
+    cameraModal.className = 'tm-overlay';
+    cameraModal.style.zIndex = '2147483647';
+    cameraModal.innerHTML = `
+      <div class="tm-modal tm-camera-modal" style="width: 95vw; height: 95vh;">
+        <div class="tm-modal-h">
+          <span>📷 Camera Monitoring</span>
+          <div class="tm-actions">
+            <button class="tm-iconbtn" id="tmCameraReload" title="Tải lại">↻</button>
+            <button class="tm-iconbtn" id="tmCameraClose" title="Đóng (ESC)">×</button>
+          </div>
+        </div>
+        <div class="tm-modal-b" style="padding: 0; flex: 1;">
+          <iframe src="${CAMERA_URL}" 
+                  class="tm-camera-frame" 
+                  style="width: 100%; height: 100%; border: none;"
+                  frameborder="0"></iframe>
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(cameraModal);
+
+    // Sự kiện cho nút đóng
+    cameraModal.querySelector('#tmCameraClose').onclick = closeCameraModal;
+    
+    // Sự kiện cho nút reload
+    cameraModal.querySelector('#tmCameraReload').onclick = () => {
+      const iframe = cameraModal.querySelector('.tm-camera-frame');
+      if (iframe) {
+        iframe.src = iframe.src;
+      }
+    };
+
+    // Sự kiện click ra ngoài để đóng
+    cameraModal.addEventListener('click', (e) => {
+      if (e.target === cameraModal) {
+        closeCameraModal();
+      }
+    });
+
+    // Sự kiện ESC để đóng
+    document.addEventListener('keydown', handleCameraEsc);
+  }
+
+  function closeCameraModal() {
+    if (cameraModal) {
+      document.removeEventListener('keydown', handleCameraEsc);
+      cameraModal.remove();
+      cameraModal = null;
+    }
+  }
+
+  function handleCameraEsc(e) {
+    if (e.key === 'Escape' && cameraModal) {
+      closeCameraModal();
+    }
   }
 
   /** ================ Ghi nhớ mật khẩu ================ **/
@@ -555,18 +752,16 @@
     return { lost, stale, tempOut };
   }
 
-  /** ================ Logs (overwrite/append) =========== **/
+  /** ================ Logs (LUÔN ghi đè) =========== **/
   function setLogs(text) {
     try {
-      if (OVERWRITE_LOGS_EACH_TIME) {
-        localStorage.setItem(LS_ALERT_LOGS, text);
-      } else {
-        const prev = localStorage.getItem(LS_ALERT_LOGS) || "";
-        localStorage.setItem(LS_ALERT_LOGS, prev ? prev + "\n" + text : text);
-      }
+      // LUÔN ghi đè log cũ
+      localStorage.setItem(LS_ALERT_LOGS, text);
     } catch {}
   }
+  
   const getLogs = () => localStorage.getItem(LS_ALERT_LOGS) || "";
+  
   const clearLogs = () => {
     try {
       localStorage.removeItem(LS_ALERT_LOGS);
@@ -764,9 +959,9 @@
       .tm-procedure-btn:hover {
         background: rgba(64, 128, 204, 0.16);
       }
-      .tm-custom-btn {
+      .tm-camera-btn {
         border: 1px solid rgba(255, 255, 255, 0.2);
-        background: rgba(128, 64, 204, 0.08);
+        background: rgba(255, 165, 0, 0.08);
         color: #fff;
         padding: 6px;
         border-radius: 8px;
@@ -775,8 +970,8 @@
         text-align: center;
         word-break: break-word;
       }
-      .tm-custom-btn:hover {
-        background: rgba(128, 64, 204, 0.16);
+      .tm-camera-btn:hover {
+        background: rgba(255, 165, 0, 0.16);
       }
 
       .tm-toast {
@@ -984,7 +1179,7 @@
         height: calc(100% - 82px);
         box-sizing: border-box;
         background: #d3d8d7ff;
-        color: #0c0101ff;
+        color: #05235cff;
         border: 0;
         border-top: 1px solid #333;
         padding: 10px;
@@ -1024,6 +1219,21 @@
         opacity: .7;
       }
 
+      /* Camera Modal */
+      .tm-camera-modal {
+        width: 95vw !important;
+        height: 95vh !important;
+        max-width: none !important;
+        max-height: none !important;
+      }
+
+      .tm-camera-frame {
+        width: 100%;
+        height: 100%;
+        border: none;
+        background: white;
+      }
+
       /* Responsive design */
       @media (max-width: 768px) {
         .tm-panel {
@@ -1047,6 +1257,10 @@
         .tm-mini-window {
           width: 95vw;
           height: 85vh;
+        }
+        .tm-camera-modal {
+          width: 98vw !important;
+          height: 98vh !important;
         }
       }
 
@@ -1147,6 +1361,8 @@
         </div>
         <textarea class="tm-mini-textarea" id="tmMiniTextarea" readonly></textarea>
         <div class="tm-mini-footer">
+ 
+        <button class="copy"><a href="https://docs.google.com/spreadsheets/d/1VusUQdljH-jqMFIQK4g_sQFvAqmVFBB9hra_DFUDgok/edit?pli=1&gid=773053306#gid=773053306" target="_blank" style="text-decoration: none;color: #161515ff "> Inside LC </a></button>
           <button class="tm-mini-btn" id="tmMiniScanNow">Reload</button>
           <button class="tm-mini-btn" id="tmMiniCopy">Copy toàn bộ</button>
           <button class="tm-mini-btn" id="tmMiniClose">Đóng</button>
@@ -1395,6 +1611,11 @@
       alertModal = null;
     }
 
+    // Đóng modal camera
+    if (cameraModal) {
+      closeCameraModal();
+    }
+
     // Đóng modal tìm kiếm
     const searchOverlay = document.querySelector(".tm-overlay");
     if (searchOverlay) {
@@ -1419,19 +1640,21 @@
     const procedureContent = `
 QUY TRÌNH XỬ LÝ CẢNH BÁO LOGTAG
 
-
 1. XỬ LÝ MKN (LOGTAG, Elitech) và BÁO CHẬM:
  -CAMERA xem được sẽ theo dõi không cần gọi.
  -Theo dõi qua Camera xem trong TTTC hoặc kho có gì bất thường không.
 
-
 2. XỬ LÝ NHIỆT ĐỘ BẤT THƯỜNG:
    - Có cảnh báo nhiệt độ cao hoặc thấp, theo dõi liên tục, nếu không (tăng, hạ) thì gọi shop ngay lập tức.
-
 
 3. Xử lý CAMERA MKN:
     - Camera MKN -> gọi điều dưỡng -> Bác sĩ.... -> ASM (không ai lên shop được thì chỉ cần thông báo và bàn giao ASM)
     - TH tất cả đều không nghe máy -> Báo lại TN mail bàn giao.
+4. Hướng dẫn sử dụng: 
+    -2p web sẽ tự reload lại.
+    -5p sẽ cảnh báo 1 lần
+    - Nếu muốn nhận thông báo ngay thì bấm "Quét&Báo ngay" hoặc "Reload".
+    - Mini window: mở 1 tab riêng để theo dõi logtag, bấm reload để quét cảnh báo mới.
     
     `.trim();
 
@@ -1445,9 +1668,10 @@ QUY TRÌNH XỬ LÝ CẢNH BÁO LOGTAG
         </div>
         <div class="tm-modal-b">
           <textarea class="tm-textarea" readonly style="font-size: 15px; line-height: 1.5; background: #dfe9edff;color: black"> ${procedureContent} </textarea>
-          <a href="https://google.com" target="_blank">Xem quy trình đầy đủ tại đây</a>
+          
         </div>
         <div class="tm-modal-f">
+        <a href="https://docs.google.com/spreadsheets/d/1VusUQdljH-jqMFIQK4g_sQFvAqmVFBB9hra_DFUDgok/edit?pli=1&gid=773053306#gid=773053306" target="_blank style="text-decoration: none;" >Xem quy trình đầy đủ tại đây</a>
           <button class="tm-btn" id="tmCopyProcedure">Copy nội dung</button>
         </div>
       </div>`;
@@ -1475,7 +1699,7 @@ QUY TRÌNH XỬ LÝ CẢNH BÁO LOGTAG
         procedureModal.remove();
         procedureModal = null;
       }
-    };
+    });
 
     // Sự kiện keydown trong modal
     procedureModal.addEventListener("keydown", (e) => {
@@ -1492,125 +1716,7 @@ QUY TRÌNH XỬ LÝ CẢNH BÁO LOGTAG
     soundBtn.innerHTML = enabled ? "🔊" : "🔇";
     soundBtn.classList.toggle("muted", !enabled);
   }
-
-  /** ==================== Custom Script Button ==================== **/
-  function setupCustomScriptButton() {
-    // Tạo nút mở trang với script tùy chỉnh
-    const customBtn = document.createElement("button");
-    customBtn.className = "tm-custom-btn";
-    customBtn.innerHTML = "🔧 Script Tùy chỉnh";
-    customBtn.title = "Mở trang với script tùy chỉnh";
-
-    customBtn.onclick = () => {
-      openCustomScriptPage();
-      // Tự động ẩn toast sau khi click
-      setTimeout(() => {
-        if (toastDiv) toastDiv.style.opacity = "0";
-      }, 500);
-    };
-
-    return customBtn;
-  }
-
-  function openCustomScriptPage() {
-    // Tạo URL với script được nhúng
-    const customHtml = `
-<!DOCTYPE html>
-<html lang="vi">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Script Tùy chỉnh</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            margin: 0;
-            padding: 20px;
-            background: #f0f0f0;
-        }
-        .container {
-            max-width: 800px;
-            margin: 0 auto;
-            background: white;
-            padding: 20px;
-            border-radius: 8px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-        }
-        h1 {
-            color: #333;
-            text-align: center;
-        }
-        .script-info {
-            background: #e8f4fd;
-            padding: 15px;
-            border-radius: 5px;
-            margin: 15px 0;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>🔧 Script Tùy chỉnh</h1>
-        <div class="script-info">
-            <p><strong>Trang này đã được tải với script tùy chỉnh!</strong></p>
-            <p>Bạn có thể thêm các tính năng JavaScript tùy chỉnh vào đây.</p>
-        </div>
-        
-        <div id="custom-content">
-            <h2>Nội dung tùy chỉnh</h2>
-            <p>Đây là nơi bạn có thể thêm các tính năng và nội dung tùy chỉnh.</p>
-            <button onclick="showCustomAlert()">Click để kiểm tra script</button>
-        </div>
-    </div>
-
-    <script>
-        // Script tùy chỉnh của bạn có thể được thêm vào đây
-        function showCustomAlert() {
-            alert('Script tùy chỉnh đang hoạt động!');
-            
-            // Thêm các tính năng tùy chỉnh khác tại đây
-            const contentDiv = document.getElementById('custom-content');
-            const newElement = document.createElement('div');
-            newElement.innerHTML = '<p style="color: green; font-weight: bold;">✅ Script đã thực thi thành công!</p>';
-            contentDiv.appendChild(newElement);
-        }
-
-        // Tự động chạy một số script khi trang tải
-        document.addEventListener('DOMContentLoaded', function() {
-            console.log('Script tùy chỉnh đã được tải');
-            
-            // Thêm các tính năng tự động tại đây
-            // Ví dụ: thêm timestamp
-            const timestamp = document.createElement('p');
-            timestamp.textContent = 'Trang được tải lúc: ' + new Date().toLocaleString();
-            timestamp.style.fontSize = '12px';
-            timestamp.style.color = '#666';
-            timestamp.style.textAlign = 'center';
-            document.querySelector('.container').appendChild(timestamp);
-        });
-
-        // Thêm các hàm tùy chỉnh khác của bạn ở đây
-        function customFunction() {
-            // Thêm logic tùy chỉnh của bạn
-            console.log('Hàm tùy chỉnh được gọi');
-        }
-    </script>
-</body>
-</html>`;
-
-    // Mở trong tab mới
-    const blob = new Blob([customHtml], { type: 'text/html' });
-    const url = URL.createObjectURL(blob);
-    const newTab = window.open(url, '_blank');
-    
-    // Dọn dẹp URL sau khi tải
-    if (newTab) {
-        newTab.addEventListener('load', () => {
-            URL.revokeObjectURL(url);
-        });
-    }
-  }
-
+// nút camera
   function createPanel() {
     if (panel) return panel;
     injectStyles();
@@ -1634,6 +1740,7 @@ QUY TRÌNH XỬ LÝ CẢNH BÁO LOGTAG
           <button class="tm-btn" id="tmMini">Mini window</button>
           <button class="tm-btn" id="tmShowNow">Quét & Báo ngay</button>
           <button class="tm-procedure-btn" id="tmProcedure">Quy trình gọi</button>
+          <button class="tm-camera-btn" id="tmCamera">📷 Camera</button>
         </div>
       </div>`;
     document.body.appendChild(panel);
@@ -1645,26 +1752,21 @@ QUY TRÌNH XỬ LÝ CẢNH BÁO LOGTAG
     toastDiv.className = "tm-toast";
     document.body.appendChild(toastDiv);
 
-    // Thêm nút script tùy chỉnh vào panel
-    const customBtn = setupCustomScriptButton();
-    const btnsContainer = panel.querySelector(".tm-btns");
-    btnsContainer.appendChild(customBtn);
-
     enableDrag(panel, panel, LS_PANEL_POS);
 
-    // Sửa lại sự kiện cho nút "Quét & Báo ngay" - HIỆN MINI WINDOW
+    // Sửa lại sự kiện cho nút "Quét & Báo ngay" - CHỈ HIỆN MINI WINDOW KHI CÓ CẢNH BÁO
     panel.querySelector("#tmShowNow").onclick = () => {
       console.log("Nút Quét & Báo ngay được click");
       const result = showAlertsOnce({ bypassCooldown: true });
 
-      // LUÔN HIỂN THỊ MINI WINDOW SAU KHI QUÉT
-      showMiniWindowModal();
-
       if (result) {
+        // CHỈ hiển thị Mini Window khi có cảnh báo mới
+        showMiniWindowModal();
         showToast("Đã quét và gửi cảnh báo thành công");
+        
         // Hiển thị cảnh báo lớn trên màn hình chính
         const { lost, stale, tempOut } = buildLists();
-        const totalAlerts = lost.length + stale.length + tempOut.length;
+        const cameraAlerts = checkCameraAlerts();
         let alertMessage = `CẢNH BÁO MỚI!`;
 
         if (lost.length > 0) {
@@ -1676,13 +1778,17 @@ QUY TRÌNH XỬ LÝ CẢNH BÁO LOGTAG
         if (tempOut.length > 0) {
           alertMessage += `\n${tempOut.length} tủ nhiệt độ bất thường`;
         }
+        if (cameraAlerts.length > 0) {
+          alertMessage += `\n${cameraAlerts.length} camera mất kết nối`;
+        }
 
-        showMainAlert(alertMessage, "alert", 8000);
+        showMainAlert(alertMessage, "alert", 3000);
       } else {
+        // KHÔNG hiển thị gì thêm khi không có cảnh báo
         showToast("Không có cảnh báo mới");
-        showMainAlert("✅ Không có cảnh báo mới", "success", 3000);
       }
       updatePanel();
+      
       // Tự động ẩn toast sau khi click
       setTimeout(() => {
         if (toastDiv) toastDiv.style.opacity = "0";
@@ -1708,6 +1814,16 @@ QUY TRÌNH XỬ LÝ CẢNH BÁO LOGTAG
 
     panel.querySelector("#tmProcedure").onclick = () => {
       showProcedureModal();
+      // Tự động ẩn toast sau khi click
+      setTimeout(() => {
+        if (toastDiv) toastDiv.style.opacity = "0";
+      }, 500);
+    };
+
+    // Nút Camera mới - Mở modal
+    panel.querySelector("#tmCamera").onclick = () => {
+      openCameraModal();
+      showToast("Đang mở Camera...");
       // Tự động ẩn toast sau khi click
       setTimeout(() => {
         if (toastDiv) toastDiv.style.opacity = "0";
@@ -1795,7 +1911,7 @@ QUY TRÌNH XỬ LÝ CẢNH BÁO LOGTAG
   body{margin:0;background:#111;color:#eee;font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace}
   header{padding:8px 10px;background:#181818;display:flex;gap:8px;align-items:center;justify-content:space-between;position:sticky;top:0}
   header b{font-size:12px}
-  textarea{width:100%;height:calc(100vh - 82px);box-sizing:border-box;background:#EEEEEE;color:#000000;border:0;border-top:1px solid #cdc5c5ff;padding:10px;resize:none;white-space:pre;font-weight:bold; font-size:18px}
+  textarea{width:100%;height:calc(100vh - 82px);box-sizing:border-box;background:#d3d8d7ff;color:#05235cff;border:0;border-top:1px solid #cdc5c5ff;padding:10px;resize:none;white-space:pre;font-weight:bold; font-size:13px}
   button{background:#2a2a2a;border:1px solid #444;color:#fff;border-radius:8px;padding:6px 10px;cursor:pointer}
   button:hover{background:#383838}
   footer{padding:8px 10px;background:#181818;display:flex;gap:8px;justify-content:flex-end;position:sticky;bottom:0}
@@ -1804,6 +1920,7 @@ QUY TRÌNH XỬ LÝ CẢNH BÁO LOGTAG
   <header><b>📄Thông báo</b><span class="muted" id="ts"></span></header>
   <textarea id="ta" readonly></textarea>
   <footer>
+    <button class="copy"><a href="https://insidepharmacy.fptshop.com.vn/LongChau.aspx" target="_blank" style="text-decoration: none;color: #cdc5c5ff "> Inside LC </a></button>
     <button id="scanNow">Reload</button>
     <button id="copy">Copy toàn bộ</button>
   </footer>
@@ -1939,10 +2056,15 @@ QUY TRÌNH XỬ LÝ CẢNH BÁO LOGTAG
 
     console.log("Bắt đầu quét cảnh báo...");
     const { lost, stale, tempOut } = buildLists();
-    console.log("Kết quả quét:", { lost, stale, tempOut });
+    const cameraAlerts = checkCameraAlerts();
+    console.log("Kết quả quét:", { lost, stale, tempOut, cameraAlerts });
 
-    if (!lost.length && !stale.length && !tempOut.length) {
+    // XÓA LOG CŨ TRƯỚC KHI KIỂM TRA CẢNH BÁO MỚI
+    clearLogs();
+
+    if (!lost.length && !stale.length && !tempOut.length && !cameraAlerts.length) {
       console.log("Không có cảnh báo nào");
+      // KHÔNG ghi gì vào logs khi không có cảnh báo
       return false;
     }
 
@@ -2001,7 +2123,7 @@ QUY TRÌNH XỬ LÝ CẢNH BÁO LOGTAG
             );
 
             // Căn trái label và căn phải nhiệt độ
-            const paddedLabel = formattedLabel.padEnd(maxLabelLength + 6, " ");
+            const paddedLabel = formattedLabel.padEnd(maxLabelLength + 10, " ");
             const tempPart = `${it.value}°C`;
 
             const line =
@@ -2012,6 +2134,19 @@ QUY TRÌNH XỬ LÝ CẢNH BÁO LOGTAG
             return [line, ""]; // Trả về mảng [dòng, hàng trống]
           })
           .flat() // Làm phẳng mảng
+      );
+    }
+    if (cameraAlerts.length) {
+      lines.push("");
+      lines.push("");
+      lines.push(`**********CAMERA MẤT KẾT NỐI********** ${cameraAlerts.length} Camera`);
+      lines.push("");
+      lines.push(
+        ...cameraAlerts
+          .map((it) => {
+            const prefix = it.isGS ? '📷 Cam GS: ' : '📷 ';
+            return `${prefix}${it.label} — ${it.mins}m`;
+          })
       );
     }
     const text = lines.filter((s) => s != null).join("\n");
@@ -2035,6 +2170,25 @@ QUY TRÌNH XỬ LÝ CẢNH BÁO LOGTAG
     return true;
   }
 
+  /** ==================== Camera Background Scan ==================== **/
+  function startCameraBackgroundScan() {
+    // Chỉ chạy camera scan nếu đang ở trang camera
+    if (window.location.href.includes('camera-giamsat-mon')) {
+      setInterval(() => {
+        try {
+          const cameraAlerts = checkCameraAlerts();
+          if (cameraAlerts.length > 0) {
+            console.log('Camera alerts detected:', cameraAlerts);
+            // Tích hợp cảnh báo camera vào hệ thống chung
+            showAlertsOnce({ bypassCooldown: true });
+          }
+        } catch (e) {
+          console.error('Camera background scan error:', e);
+        }
+      }, CAMERA_RESCAN_MS);
+    }
+  }
+
   /** ==================== Message Handler for Mini Tab ==================== **/
   function setupMessageHandler() {
     window.addEventListener("message", function (event) {
@@ -2045,9 +2199,8 @@ QUY TRÌNH XỬ LÝ CẢNH BÁO LOGTAG
         if (result) {
           showToast("Đã quét và gửi cảnh báo từ mini tab");
           const { lost, stale, tempOut } = buildLists();
-          const totalAlerts = lost.length + stale.length + tempOut.length;
-          let alertMessage = `CẢNH BÁO MỚI!
-          `;
+          const cameraAlerts = checkCameraAlerts();
+          let alertMessage = `CẢNH BÁO MỚI!`;
 
           if (lost.length > 0) {
             alertMessage += `\n${lost.length} tủ MKN`;
@@ -2056,13 +2209,16 @@ QUY TRÌNH XỬ LÝ CẢNH BÁO LOGTAG
             alertMessage += `\n${stale.length} tủ báo chậm`;
           }
           if (tempOut.length > 0) {
-            alertMessage += `\${tempOut.length} tủ nhiệt độ bất thường`;
+            alertMessage += `\n${tempOut.length} tủ nhiệt độ bất thường`;
+          }
+          if (cameraAlerts.length > 0) {
+            alertMessage += `\n${cameraAlerts.length} camera mất kết nối`;
           }
 
-          showMainAlert(alertMessage, "alert", 8000);
+          showMainAlert(alertMessage, "alert",  3000);
         } else {
           showToast("Không có cảnh báo mới từ mini tab");
-          showMainAlert("✅ Không có cảnh báo mới", "success", 3000);
+          // KHÔNG hiển thị alert chính khi không có cảnh báo
         }
       }
     });
@@ -2097,8 +2253,8 @@ QUY TRÌNH XỬ LÝ CẢNH BÁO LOGTAG
       }, 1500);
     }
 
-    // Chỉ khởi tạo panel khi đã ở trang locations
-    if (window.location.pathname.includes("/locations")) {
+    // Chỉ khởi tạo panel khi đã ở trang locations hoặc camera
+    if (window.location.pathname.includes("/locations") || window.location.href.includes('camera-giamsat-mon')) {
       createPanel();
       try {
         const pos = JSON.parse(localStorage.getItem(LS_PANEL_POS) || "null");
@@ -2115,6 +2271,9 @@ QUY TRÌNH XỬ LÝ CẢNH BÁO LOGTAG
       showAlertsOnce();
       setInterval(showAlertsOnce, RESCAN_INTERVAL_MS);
       setTimeout(() => location.reload(), RELOAD_AFTER_MS);
+
+      // Bắt đầu scan camera nền (chỉ khi ở trang camera)
+      startCameraBackgroundScan();
 
       setupGlobalEscHandler();
     }
